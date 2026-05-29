@@ -1,3 +1,4 @@
+
 #include "INA226Read.h"
 
 // -------------------------------
@@ -36,19 +37,20 @@ INA226Read::INA226Read(uint8_t address, float rshunt, float currentLsb) {
 // -------------------------------
 // 初始化函数
 // 作用：
-// 1. 启动 I2C
-// 2. 写配置寄存器
-// 3. 写校准寄存器
-// 4. 试着读一下芯片 ID，看看是否通信正常
+// 1. 挂载已初始化的 I2C 总线
+// 2. 读芯片 ID 作为通信判断
+// 3. 写配置和校准寄存器
 // -------------------------------
-bool INA226Read::begin(int sda, int scl, TwoWire &wirePort) {
+bool INA226Read::begin(TwoWire &wirePort) {
   _wire = &wirePort;
 
-  // 初始化 I2C，总线引脚由你指定
-  _wire->begin(sda, scl);
-
-  // 如果需要，也可以设置时钟，例如 100kHz
-  // _wire->setClock(100000);
+  // 读芯片 ID 作为连通性判断 (TI 的 INA226 DIE ID 应该是 0x2260)
+  uint16_t id = readDieID();
+  
+  // 如果读到 0x0000 或 0xFFFF，说明通信有问题或没有接传感器
+  if (id == 0x0000 || id == 0xFFFF) {
+    return false;
+  }
 
   // 写入配置寄存器
   setConfig(_config);
@@ -56,11 +58,7 @@ bool INA226Read::begin(int sda, int scl, TwoWire &wirePort) {
   // 写入校准值
   setCalibration();
 
-  // 读芯片 ID 作为简单连通性判断
-  uint16_t id = readDieID();
-
-  // 如果读到 0x0000 或 0xFFFF，通常说明通信有问题
-  return (id != 0x0000 && id != 0xFFFF);
+  return true;
 }
 
 // -------------------------------
@@ -167,6 +165,12 @@ float INA226Read::readShuntVoltage_mV() {
 // 实际电流 = 原始值 × currentLsb
 // -------------------------------
 float INA226Read::readCurrent() {
+  // 防掉电机制：如果校准寄存器归零了（芯片发生了复位），必须重新写入
+  if (readRegister16(REG_CALIBRATION) == 0) {
+      setConfig(_config);
+      setCalibration();
+  }
+
   int16_t raw = readRegisterS16(REG_CURRENT);
   return raw * _currentLsb;
 }
@@ -178,6 +182,12 @@ float INA226Read::readCurrent() {
 // 所以：实际功率 = 原始值 × (25 × currentLsb)
 // -------------------------------
 float INA226Read::readPower() {
+  // 防掉电机制
+  if (readRegister16(REG_CALIBRATION) == 0) {
+      setConfig(_config);
+      setCalibration();
+  }
+
   uint16_t raw = readRegister16(REG_POWER);
   float powerLsb = 25.0f * _currentLsb;
   return raw * powerLsb;
@@ -198,3 +208,4 @@ uint16_t INA226Read::readManufacturerID() {
 uint16_t INA226Read::readDieID() {
   return readRegister16(REG_DIE_ID);
 }
+// ina226read.cpp

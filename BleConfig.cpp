@@ -21,7 +21,6 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onDisconnect(BLEServer* pServer) {
         bleConfig.setDeviceConnected(false);
         Serial.println("BLE Device Disconnected");
-        // 断开连接后重新开始广播，以便其他设备连接
         if (bleConfig.isBleEnabled()) {
             BLEDevice::startAdvertising();
         }
@@ -32,11 +31,15 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         String rxValue = pCharacteristic->getValue().c_str();
         if (rxValue.length() > 0) {
-            // 解析来自 App 的指令，支持格式: M=0&P=50 (M: 模式 0/1, P: 进度 0-100)
-            int m = -1, p = -1;
-            if (sscanf(rxValue.c_str(), "M=%d&P=%d", &m, &p) == 2) {
-                bleConfig.triggerCallback((WorkMode)m, p);
-                Serial.printf("BLE Recv Config -> Mode: %d, Prog: %d\n", m, p);
+            Serial.printf("BLE Recv: %s\n", rxValue.c_str());
+            if (rxValue == "HBT") {
+                bleConfig.requestStatus();
+            } else {
+                int m = -1, p = -1;
+                if (sscanf(rxValue.c_str(), "M=%d&P=%d", &m, &p) == 2) {
+                    bleConfig.triggerCallback((WorkMode)m, p);
+                    Serial.printf("BLE Recv Config -> Mode: %d, Prog: %d\n", m, p);
+                }
             }
         }
     }
@@ -53,7 +56,7 @@ void BleConfig::init() {
     // TX 特征（ESP32 到 App 的 Notify）
     pTxCharacteristic = pService->createCharacteristic(
         CHARACTERISTIC_UUID_TX,
-        BLECharacteristic::PROPERTY_NOTIFY
+        BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
     );
     pTxCharacteristic->addDescriptor(new BLE2902());
 
@@ -66,45 +69,53 @@ void BleConfig::init() {
 
     pService->start();
     
-    // 初始化完成默认开启 BLE 广播
-    setBleEnabled(true);
+    // 初始化完成默认关闭 BLE 广播
+    setBleEnabled(false);
 }
 
 void BleConfig::setBleEnabled(bool enable) {
     bleEnabled = enable;
     if (enable) {
         BLEDevice::startAdvertising();
-        bleStartTime = millis();
         Serial.println("BLE Enabled and Advertising");
     } else {
-        // 关闭广播（不再接受新连接）
         BLEDevice::stopAdvertising();
         Serial.println("BLE Disabled");
     }
 }
 
-bool BleConfig::checkBleTimer() {
-    // 开启后超过 10 分钟自动关闭 BLE
-    if (bleEnabled && (millis() - bleStartTime > 10 * 60 * 1000)) {
-        setBleEnabled(false);
-        return true; // 触发了自动关闭
-    }
-    return false;
-}
-
 void BleConfig::updateStatus(WorkMode mode, int progress) {
     currentMode = mode;
     currentProgress = progress;
-    notifyStatus(); // 状态改变时通知 App
+    pendingNotify = true;
+}
+
+void BleConfig::requestStatus() {
+    notifyStatus();
+}
+
+void BleConfig::handleTask() {
+    if (pendingNotify && (millis() - lastNotifyTime >= 500)) {
+        pendingNotify = false;
+        lastNotifyTime = millis();
+        lastTelemetryNotifyTime = millis();
+        notifyStatus();
+    }
+    if (!pendingNotify && deviceConnected && (millis() - lastTelemetryNotifyTime >= 3000)) {
+        lastTelemetryNotifyTime = millis();
+        notifyStatus();
+    }
 }
 
 void BleConfig::notifyStatus() {
-    // 将状态打包成 JSON 通过 Notify 发送给连接的手机 App
-    if (pTxCharacteristic != nullptr) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "{\"mode\":%d,\"progress\":%d,\"v\":%.2f,\"i\":%.2f}", 
-                 currentMode, currentProgress, voltage, current);
-        pTxCharacteristic->setValue((uint8_t*)buf, strlen(buf));
-        pTxCharacteristic->notify();
-    }
+    if (!deviceConnected) return;
+    if (pTxCharacteristic == nullptr) return;
+    
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d,%d,%.2f,%.2f", 
+             currentMode, currentProgress, voltage, current);
+    pTxCharacteristic->setValue((uint8_t*)buf, strlen(buf));
+    pTxCharacteristic->notify();
+    Serial.printf("BLE Notify: %s\n", buf);
 }
+// bleconfig.cpp

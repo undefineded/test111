@@ -16,13 +16,11 @@ public:
   INA226Read(uint8_t address = 0x44, float rshunt = 0.1f, float currentLsb = 0.001f);
 
   /**
-   * 初始化 INA226 和 I2C
-   * @param sda         SDA 引脚号
-   * @param scl         SCL 引脚号
-   * @param wirePort    使用哪个 Wire 对象，默认就是 Wire
-   * @return            true 表示初始化看起来正常，false 表示可能没读到芯片
+   * 初始化 INA226
+   * @param wirePort    使用哪个 Wire 对象，默认是 Wire
+   * @return            true 表示初始化正常，false 表示没读到芯片
    */
-  bool begin(int sda, int scl, TwoWire &wirePort = Wire);
+  bool begin(TwoWire &wirePort = Wire);
 
   /**
    * 设置配置寄存器
@@ -83,4 +81,4 @@ private:
   int16_t readRegisterS16(uint8_t reg);
 };
 
-#endif
+#endif // INA226READ_H

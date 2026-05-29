@@ -18,16 +18,20 @@ public:
     // 主动同步设备状态到手机 App（如：通过旋钮调节后）
     void updateStatus(WorkMode mode, int progress);
 
-    // 动态控制 BLE 开关与 10 分钟自动关闭
+    // 心跳请求：立即回传当前状态，不修改任何参数
+    void requestStatus();
+
+    // 处理定时任务（如限流发送 notify）
+    void handleTask();
+
+    // 动态控制 BLE 开关（状态持久化由主程序通过铁电存储管理）
     void setBleEnabled(bool enable);
     bool isBleEnabled() const { return bleEnabled; }
-    bool checkBleTimer(); // 在主循环中调用，超时返回true
 
     // 更新采集数据
     void setTelemetry(float v, float i) {
         voltage = v;
         current = i;
-        notifyStatus(); // 每次采集后如果需要可通知，这里暂定
     }
 
     // 内部供回调使用的触发器
@@ -50,7 +54,10 @@ private:
 
     bool bleEnabled = false;
     bool deviceConnected = false;
-    unsigned long bleStartTime = 0;
+    
+    bool pendingNotify = false;
+    unsigned long lastNotifyTime = 0;
+    unsigned long lastTelemetryNotifyTime = 0;
 };
 
 extern BleConfig bleConfig;
