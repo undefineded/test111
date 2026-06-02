@@ -63,6 +63,27 @@ static void rotateXBM32(const uint8_t* src, uint8_t* dst, float angleDeg) {
 
 // ======================== 核心逻辑 ========================
 
+#define FAN_ANIM_FRAMES 60
+static uint8_t precomputedFanFrames[FAN_ANIM_FRAMES][128];
+static bool isFanFramesPrecomputed = false;
+
+static void precomputeFanFrames() {
+    if (isFanFramesPrecomputed) return;
+    
+    uint8_t lsbBuf[128];
+    convertMSBtoLSB(fengcheData, lsbBuf, 128);
+    
+    for (int i = 0; i < FAN_ANIM_FRAMES; i++) {
+        float angle = i * (360.0f / FAN_ANIM_FRAMES);
+        if (i == 0) {
+            memcpy(precomputedFanFrames[i], lsbBuf, 128);
+        } else {
+            rotateXBM32(lsbBuf, precomputedFanFrames[i], angle);
+        }
+    }
+    isFanFramesPrecomputed = true;
+}
+
 void DisplayUI::drawBootScreen(const char* version) {
     const uint32_t BOOT_DURATION_MS = 3000;
     const uint32_t startTime = millis();
@@ -123,6 +144,7 @@ void DisplayUI::drawBootScreen(const char* version) {
 void DisplayUI::init(U8G2 *u8g2_ptr) {
     u8g2 = u8g2_ptr;
     u8g2->enableUTF8Print();  // 启用UTF8以支持中文显示
+    precomputeFanFrames();    // 预计算风扇动画帧，避免渲染时进行耗时的浮点运算
 }
 
 void DisplayUI::processInput(int encoderDelta, bool isLongPress, bool isShortPress) {
@@ -138,6 +160,7 @@ void DisplayUI::processInput(int encoderDelta, bool isLongPress, bool isShortPre
             currentScreen = SCREEN_FAN;
         }
         isEditing = false; // 切换屏幕时强制退出编辑模式
+        forceFullRefresh = true; // 切换屏幕后强制全屏刷新
         return; // 长按处理完毕后直接返回
     }
 
@@ -207,8 +230,8 @@ void DisplayUI::processInput(int encoderDelta, bool isLongPress, bool isShortPre
             }
             
             int step;
-            if (encoderAccel >= 7) {
-                // 连续快速转动7次后，步进5
+            if (encoderAccel >= 5) {
+                // 连续快速转动5次后，步进5
                 step = 5;
             } else {
                 // 慢速转动或刚开始快速转动，步进1
@@ -265,8 +288,8 @@ void DisplayUI::processInput(int encoderDelta, bool isLongPress, bool isShortPre
                     }
                     
                     int step;
-                    if (encoderAccel >= 7) {
-                        // 连续快速转动7次后，步进5
+                    if (encoderAccel >= 5) {
+                        // 连续快速转动5次后，步进5
                         step = 5;
                     } else {
                         // 慢速转动或刚开始快速转动，步进1
@@ -310,31 +333,33 @@ void DisplayUI::processInput(int encoderDelta, bool isLongPress, bool isShortPre
 }
 
 void DisplayUI::render() {
-    u8g2->clearBuffer();
-    
     if (currentScreen == SCREEN_FAN) {
+        // 第0屏内部实现了局部刷新逻辑，接管了 clearBuffer 和 sendBuffer
         drawScreen0();
-    } else if (currentScreen == SCREEN_MENU) {
-        drawScreen1();
     } else {
-        drawScreen2();
+        u8g2->clearBuffer();
+        if (currentScreen == SCREEN_MENU) {
+            drawScreen1();
+        } else {
+            drawScreen2();
+        }
+        u8g2->sendBuffer();
     }
-    
-    u8g2->sendBuffer();
 }
 
 // ======================== 风扇控制主面板 (第0屏) ========================
 void DisplayUI::drawScreen0() {
     unsigned long now = millis();
 
+    // 进度条立即生效（在风扇速度计算之前赋值，确保动画响应及时）
+    displayProgress = progress;
+
     // 风扇图标旋转动画
-    // 二次曲线映射: 低速可见(3fps), 高速流畅(20fps), 更符合真实风扇手感
-    // fps = 3 + 17 * (speed/100)^2
-    //   1% → 3fps, 25% → 4fps, 50% → 7fps, 75% → 13fps, 100% → 20fps
+    // 线性映射: 进度 0% → 0fps, 100% → 30fps, 最低1fps保证低速可见
     float targetFps = 0;
     if (displayProgress > 0) {
-        float speedRatio = displayProgress / 100.0f;
-        targetFps = 3.0f + 17.0f * speedRatio * speedRatio;
+        targetFps = displayProgress / 100.0f * 30.0f;
+        if (targetFps < 1.0f) targetFps = 1.0f;
     }
 
     // 平滑加减速: 指数平滑让风扇逐渐加速/减速，而非瞬间跳变
@@ -343,100 +368,114 @@ void DisplayUI::drawScreen0() {
     if (targetFps == 0 && fanAnimSpeed < 0.5f) fanAnimSpeed = 0;
 
     unsigned long fanInterval = (fanAnimSpeed > 0.5f) ? (unsigned long)(1000.0f / fanAnimSpeed) : 0xFFFFFFFFUL;
-    if (now - lastFanAnimTime >= fanInterval) {
-        fanAnimPhase = (fanAnimPhase + 1) % 16;
-        lastFanAnimTime = now;
+    if (fanInterval != 0xFFFFFFFFUL && now - lastFanAnimTime >= fanInterval) {
+        // 补偿丢失的帧数，而不是固定加1，避免因主循环卡顿导致动画变慢
+        unsigned long steps = (now - lastFanAnimTime) / fanInterval;
+        fanAnimPhase = (fanAnimPhase + steps) % FAN_ANIM_FRAMES;
+        lastFanAnimTime += steps * fanInterval;
+    } else if (fanInterval == 0xFFFFFFFFUL) {
+        lastFanAnimTime = now; // 停止转动时重置时间
     }
 
-    // 进度条立即生效
-    displayProgress = progress;
-
-    // ===== 右侧：风扇图标 (32x32) =====
-    const int iconX = 128 - 32 - 6;  // 右侧 padding=6, 与左侧对称
-    const int iconY = 0;
-    float angle = fanAnimPhase * 22.5f; // 16阶段, 每步22.5°
-    uint8_t lsbBuf[128];
-    convertMSBtoLSB(fengcheData, lsbBuf, 128);
-    if (fanAnimPhase == 0) {
-        u8g2->drawXBM(iconX, iconY, FAN_ICON_W, FAN_ICON_H, lsbBuf);
-    } else {
-        uint8_t rotatedBuf[128];
-        rotateXBM32(lsbBuf, rotatedBuf, angle);
-        u8g2->drawXBM(iconX, iconY, FAN_ICON_W, FAN_ICON_H, rotatedBuf);
-    }
-
-    // ===== 左侧：电压/电流/功率 信息区 =====
     // 统一5位小数，电流低于0.001A取绝对值避免负号跳变
     float dv = normalizeForDisplay(voltage, 0.000005f);
     float dc = normalizeForDisplay(current, 0.000005f);
     if (fabs(dc) < 0.001f) dc = fabs(dc);
     float pwr = normalizeForDisplay(dv * dc, 0.000005f);
 
-    const int padX = 6;    // 左侧 padding
-    const int tagW = 12;   // 标签背景宽度
-    const int tagH = 12;   // 标签背景高度
-    const int gapX = 3;    // 标签与数值间距
+    // 风扇图标区域坐标
+    const int iconX = 128 - 32 - 6;  // 右侧 padding=6, 与左侧对称
+    const int iconY = 0;
 
-    // 第1行: U (电压)
-    int row1Y = 2;
-    u8g2->setFont(u8g2_font_profont11_tr);
-    u8g2->drawBox(padX, row1Y, tagW, tagH);
-    u8g2->setDrawColor(0);
-    u8g2->setCursor(padX + 2, row1Y + 10);
-    u8g2->print("U");
-    u8g2->setDrawColor(1);
-    u8g2->setCursor(padX + tagW + gapX, row1Y + 10);
-    char uStr[16];
-    snprintf(uStr, sizeof(uStr), "%.5fV", dv);
-    u8g2->print(uStr);
+    // 浮点值用 epsilon 比较，避免 INA226 噪声导致每帧都判定为"数据变化"
+    // 5位小数显示精度：变化超过 0.00001 才算有意义的变化
+    bool vChanged = (fabs(dv - lastDrawVoltage) > 0.00001f);
+    bool iChanged = (fabs(dc - lastDrawCurrent) > 0.00001f);
+    bool pChanged = (displayProgress != lastDrawProgress);
 
-    // 第2行: I (电流)
-    int row2Y = 18;
-    u8g2->drawBox(padX, row2Y, tagW, tagH);
-    u8g2->setDrawColor(0);
-    u8g2->setCursor(padX + 3, row2Y + 10);
-    u8g2->print("I");
-    u8g2->setDrawColor(1);
-    u8g2->setCursor(padX + tagW + gapX, row2Y + 10);
-    char iStr[16];
-    snprintf(iStr, sizeof(iStr), "%.5fA", dc);
-    u8g2->print(iStr);
+    bool infoChanged = forceFullRefresh || vChanged || iChanged || pChanged;
+    bool fanChanged = (fanAnimPhase != lastFanAnimPhase);
 
-    // 第3行: P (功率)
-    int row3Y = 34;
-    u8g2->drawBox(padX, row3Y, tagW, tagH);
-    u8g2->setDrawColor(0);
-    u8g2->setCursor(padX + 2, row3Y + 10);
-    u8g2->print("P");
-    u8g2->setDrawColor(1);
-    u8g2->setCursor(padX + tagW + gapX, row3Y + 10);
-    char pStr[16];
-    snprintf(pStr, sizeof(pStr), "%.5fW", pwr);
-    u8g2->print(pStr);
+    if (infoChanged || fanChanged) {
+        if (infoChanged) {
+            u8g2->clearBuffer();
 
-    // ===== 最底部：极客风格字符进度条 =====
-    // [##########] 100%  进度条 + 百分比同行
-    u8g2->setFont(u8g2_font_profont11_tr);
-    const int barLen = 12;
-    int filled = (displayProgress * barLen + 50) / 100;
-    if (filled > barLen) filled = barLen;
-    if (filled < 0) filled = 0;
+            if (!isFanFramesPrecomputed) precomputeFanFrames();
+            u8g2->drawXBM(iconX, iconY, FAN_ICON_W, FAN_ICON_H, precomputedFanFrames[fanAnimPhase]);
 
-    // 拼接: [##########] 100%
-    char fullBar[24];
-    int pos = 0;
-    fullBar[pos++] = '[';
-    for (int i = 0; i < barLen; i++) {
-        fullBar[pos++] = (i < filled) ? '#' : '-';
+            const int padX = 6;
+            const int tagW = 12;
+            const int tagH = 12;
+            const int gapX = 3;
+
+            int row1Y = 2;
+            u8g2->setFont(u8g2_font_profont11_tr);
+            u8g2->drawBox(padX, row1Y, tagW, tagH);
+            u8g2->setDrawColor(0);
+            u8g2->setCursor(padX + 2, row1Y + 10);
+            u8g2->print("U");
+            u8g2->setDrawColor(1);
+            u8g2->setCursor(padX + tagW + gapX, row1Y + 10);
+            char uStr[16];
+            snprintf(uStr, sizeof(uStr), "%.5fV", dv);
+            u8g2->print(uStr);
+
+            int row2Y = 18;
+            u8g2->drawBox(padX, row2Y, tagW, tagH);
+            u8g2->setDrawColor(0);
+            u8g2->setCursor(padX + 3, row2Y + 10);
+            u8g2->print("I");
+            u8g2->setDrawColor(1);
+            u8g2->setCursor(padX + tagW + gapX, row2Y + 10);
+            char iStr[16];
+            snprintf(iStr, sizeof(iStr), "%.5fA", dc);
+            u8g2->print(iStr);
+
+            int row3Y = 34;
+            u8g2->drawBox(padX, row3Y, tagW, tagH);
+            u8g2->setDrawColor(0);
+            u8g2->setCursor(padX + 2, row3Y + 10);
+            u8g2->print("P");
+            u8g2->setDrawColor(1);
+            u8g2->setCursor(padX + tagW + gapX, row3Y + 10);
+            char pStr[16];
+            snprintf(pStr, sizeof(pStr), "%.5fW", pwr);
+            u8g2->print(pStr);
+
+            const int barLen = 12;
+            int filled = (displayProgress * barLen + 50) / 100;
+            if (filled > barLen) filled = barLen;
+            if (filled < 0) filled = 0;
+
+            char fullBar[24];
+            int pos = 0;
+            fullBar[pos++] = '[';
+            for (int i = 0; i < barLen; i++) {
+                fullBar[pos++] = (i < filled) ? '#' : '-';
+            }
+            fullBar[pos++] = ']';
+            fullBar[pos] = ' ';
+            pos++;
+            pos += snprintf(fullBar + pos, sizeof(fullBar) - pos, "%3d%%", displayProgress);
+
+            u8g2->setCursor(padX, 60);
+            u8g2->print(fullBar);
+        } else {
+            u8g2->setDrawColor(0);
+            u8g2->drawBox(iconX, iconY, 32, 32);
+            u8g2->setDrawColor(1);
+
+            if (!isFanFramesPrecomputed) precomputeFanFrames();
+            u8g2->drawXBM(iconX, iconY, FAN_ICON_W, FAN_ICON_H, precomputedFanFrames[fanAnimPhase]);
+        }
+
+        u8g2->sendBuffer();
+        lastDrawVoltage = dv;
+        lastDrawCurrent = dc;
+        lastDrawProgress = displayProgress;
+        lastFanAnimPhase = fanAnimPhase;
+        forceFullRefresh = false;
     }
-    fullBar[pos++] = ']';
-    fullBar[pos] = ' ';
-    pos++;
-    // 追加百分比
-    pos += snprintf(fullBar + pos, sizeof(fullBar) - pos, "%3d%%", displayProgress);
-
-    u8g2->setCursor(padX, 60);
-    u8g2->print(fullBar);
 }
 
 void DisplayUI::drawScreen1() {
@@ -517,26 +556,43 @@ void DisplayUI::drawScreen1() {
         
         // 准备右侧的数值字符串
         char valStr[16];
-        if (i == 0) {
-            snprintf(valStr, sizeof(valStr), "%d", progress);
-        } else if (i == 1) {
-            bool esc = (isEditing && currentFocus == i) ? tempModeEsc : modeEsc;
-            snprintf(valStr, sizeof(valStr), esc ? "ESC" : "FAN");
-        } else if (i == 2) {
-            bool state = (isEditing && currentFocus == i) ? tempBtState : btConnected;
-            snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
-        } else if (i == 3) {
-            bool state = (isEditing && currentFocus == i) ? tempWifiState : wifiConnected;
-            snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
-        } else if (i == 4) {
-            bool state = (isEditing && currentFocus == i) ? tempFlipEnabled : flipEnabled;
-            snprintf(valStr, sizeof(valStr), state ? "180" : "0");
-        } else if (i == 5) {
-            bool state = (isEditing && currentFocus == i) ? tempSleepEnabled : sleepEnabled;
-            snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
-        } else if (i == 6) {
-            int b = (isEditing && currentFocus == i) ? tempBrightness : brightness;
-            snprintf(valStr, sizeof(valStr), "%d", b);
+        switch (i) {
+            case MENU_SPEED:
+                snprintf(valStr, sizeof(valStr), "%d", progress);
+                break;
+            case MENU_MODE: {
+                bool esc = (isEditing && currentFocus == i) ? tempModeEsc : modeEsc;
+                snprintf(valStr, sizeof(valStr), esc ? "ESC" : "FAN");
+                break;
+            }
+            case MENU_BT: {
+                bool state = (isEditing && currentFocus == i) ? tempBtState : btConnected;
+                snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
+                break;
+            }
+            case MENU_WIFI: {
+                bool state = (isEditing && currentFocus == i) ? tempWifiState : wifiConnected;
+                snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
+                break;
+            }
+            case MENU_FLIP: {
+                bool state = (isEditing && currentFocus == i) ? tempFlipEnabled : flipEnabled;
+                snprintf(valStr, sizeof(valStr), state ? "180" : "0");
+                break;
+            }
+            case MENU_SLEEP: {
+                bool state = (isEditing && currentFocus == i) ? tempSleepEnabled : sleepEnabled;
+                snprintf(valStr, sizeof(valStr), state ? "ON" : "OFF");
+                break;
+            }
+            case MENU_BRIGHTNESS: {
+                int b = (isEditing && currentFocus == i) ? tempBrightness : brightness;
+                snprintf(valStr, sizeof(valStr), "%d", b);
+                break;
+            }
+            default:
+                valStr[0] = '\0';
+                break;
         }
         
         // 统一字体
@@ -635,5 +691,3 @@ void DisplayUI::drawScreen2() {
         u8g2->print(valueStr[i]);
     }
 }
-
-// display ui

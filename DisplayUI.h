@@ -135,9 +135,16 @@ private:
 
     // 风扇主面板动画状态
     int displayProgress = 0;        // 进度条动画用的显示值
-    int fanAnimPhase = 0;           // 风扇图标旋转阶段 (0-15, 16帧)
+    int fanAnimPhase = 0;           // 风扇图标旋转阶段
     unsigned long lastFanAnimTime = 0; // 上次风扇动画更新时间
     float fanAnimSpeed = 0;         // 当前动画帧率(fps)，平滑过渡
+    
+    // 局部刷新状态记录
+    bool forceFullRefresh = true;
+    float lastDrawVoltage = -1.0f;
+    float lastDrawCurrent = -1.0f;
+    int lastDrawProgress = -1;
+    int lastFanAnimPhase = -1;
     
     // 内部绘制函数
     void drawScreen0();

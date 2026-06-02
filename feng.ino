@@ -79,7 +79,12 @@ void applyPwmConfig(int progress, bool forceReattach = false) {
       ledcAttach(PWM_PIN, 50, 12); // 无刷电调：50Hz, 12位分辨率
       lastMode = currentWorkMode;
     }
-    int duty = map(progress, 0, 100, 200, 400); // 周期 20ms, 975us~1950us
+    // 根据示波器实测波形修正：低油门940μs，高油门2173μs
+    // 12位分辨率，50Hz周期20ms，每tick=4.88μs
+    // 940μs/4.88≈193, 2173μs/4.88≈445
+    // ESC模式下速度为0也必须输出最低油门(193)，否则电调无法完成自检
+    int duty = map(progress, 0, 100, 193, 445);
+    if (duty < 193) duty = 193; // 保底最低油门
     ledcWrite(PWM_PIN, duty);
   } else if (currentWorkMode == MODE_FAN) {
     if (modeChanged || forceReattach) {
@@ -187,13 +192,6 @@ void taskInput(void *pvParameters) {
           if (!longPressHandled && (now - pressStartTime < 1000) && (now - pressStartTime > 50)) {
             // 短按触发
             ui.processInput(0, false, true);
-
-            // 退出编辑模式时保存速度到铁电
-            if (!ui.isEditMode()) {
-              int progress = ui.getProgress();
-              uint8_t progBuf[2] = {(uint8_t)(progress & 0xFF), (uint8_t)((progress >> 8) & 0xFF)};
-              fram.writeBytes(FRAM_ADDR_PROGRESS, progBuf, 2);
-            }
 
             if (ui.consumeToggleWifi()) {
                 bool newState = !webConfig.isAPEnabled();
@@ -335,10 +333,8 @@ void setup() {
     Serial.println("MB85RC16 Init OK");
     if (fram.readByte(FRAM_ADDR_MAGIC) == FRAM_MAGIC_VALUE) {
       currentWorkMode = (WorkMode)fram.readByte(FRAM_ADDR_MODE);
-      int16_t savedProgress = (int16_t)((fram.readByte(FRAM_ADDR_PROGRESS + 1) << 8) | fram.readByte(FRAM_ADDR_PROGRESS));
-      if (savedProgress >= 0 && savedProgress <= 100) {
-        ui.setProgress(savedProgress);
-      }
+      // 移除速度记忆，暴力风扇高速启动危险，每次开机强制归零
+      ui.setProgress(0);
       bool savedFlip = (fram.readByte(FRAM_ADDR_FLIP_EN) == 1);
       ui.setFlipEnabled(savedFlip);
       bool savedSleep = (fram.readByte(FRAM_ADDR_SLEEP_EN) == 1);
@@ -377,7 +373,6 @@ void setup() {
   u8g2.setContrast(ui.getBrightness());
   ui.init(&u8g2);
   ui.drawBootScreen("v1.0"); 
-  // progress 已在铁电恢复阶段设置，无需再 setProgress(0)
   wakeUpScreen();     
 
   // ===== 4. PWM 初始化 =====
@@ -395,8 +390,6 @@ void setup() {
     ui.setProgress(progress);
     applyPwmConfig(progress, true);
     fram.writeByte(FRAM_ADDR_MODE, mode);
-    uint8_t progBuf[2] = {(uint8_t)(progress & 0xFF), (uint8_t)((progress >> 8) & 0xFF)};
-    fram.writeBytes(FRAM_ADDR_PROGRESS, progBuf, 2);
     bleConfig.updateStatus(mode, progress);
   });
 
@@ -417,8 +410,6 @@ void setup() {
     ui.setProgress(progress);
     applyPwmConfig(progress, true);
     fram.writeByte(FRAM_ADDR_MODE, mode);
-    uint8_t progBuf[2] = {(uint8_t)(progress & 0xFF), (uint8_t)((progress >> 8) & 0xFF)};
-    fram.writeBytes(FRAM_ADDR_PROGRESS, progBuf, 2);
     webConfig.updateStatus(mode, progress);
   });
 
