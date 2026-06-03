@@ -75,6 +75,8 @@ public:
 
     // 获取当前是否处于编辑模式
     bool isEditMode() const { return isEditing; }
+    // 获取当前屏幕
+    UIScreen getCurrentScreen() const { return currentScreen; }
 
     // 绘制开机画面
     void drawBootScreen(const char* version = "v1.0");

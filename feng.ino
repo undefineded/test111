@@ -254,7 +254,8 @@ void taskInput(void *pvParameters) {
         wakeUpScreen();
         ui.processInput(delta, false);
         
-        if (ui.isEditMode()) {
+        // 第一屏主面板直接调速，第二屏菜单需进入编辑模式
+        if (ui.isEditMode() || ui.getCurrentScreen() == SCREEN_FAN) {
           int progress = ui.getProgress();
           applyPwmConfig(progress);
           webConfig.updateStatus(currentWorkMode, progress);
@@ -372,12 +373,13 @@ void setup() {
   // 恢复屏幕亮度
   u8g2.setContrast(ui.getBrightness());
   ui.init(&u8g2);
+
+  // ===== 4. PWM 初始化（必须在开机动画之前，确保电调上电立即收到最低油门信号完成自检）=====
+  ui.setModeEsc(currentWorkMode == MODE_ESC);
+  applyPwmConfig(ui.getProgress(), true);
+
   ui.drawBootScreen("v1.0"); 
   wakeUpScreen();     
-
-  // ===== 4. PWM 初始化 =====
-  ui.setModeEsc(currentWorkMode == MODE_ESC);
-  applyPwmConfig(ui.getProgress(), true); 
   // 开机动画已在 drawBootScreen 中阻塞3秒，此处无需额外延时
 
   // ===== 5. 通讯模块初始化 =====
